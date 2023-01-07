@@ -43,12 +43,13 @@ if command == ".dbinfo":
     with open(database_file_path, "rb") as database_file:
         # You can use print statements as follows for debugging, they'll be visible when running tests.
         print("Logs from your program will appear here!")
-        header = parse_header(database_file.read()[:100])
-        print(f"database page size: {header.page_size}")
+
+        # header = parse_header(database_file.read()[:100])
+        # print(f"database page size: {header.page_size}")
 
         # Uncomment this to pass the first stage
-        # database_file.seek(16)  # Skip the first 16 bytes of the header
-        # page_size = int.from_bytes(database_file.read(2), byteorder="big")
-        # print(f"database page size: {page_size}")
+        database_file.seek(16)  # Skip the first 16 bytes of the header
+        page_size = int.from_bytes(database_file.read(2), byteorder="big")
+        print(f"database page size: {page_size}")
 else:
     print(f"Invalid command: {command}")
