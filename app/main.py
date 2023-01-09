@@ -1,12 +1,15 @@
 import sys
+from typing import Optional
 
 from dataclasses import dataclass
 from struct import unpack
 
+HEADER_SIZE = 100
+
 
 # import sqlparse - available if you need it!
 @dataclass(frozen=True)
-class Header:
+class FileHeader:
     magic_number: str
     page_size: int
     write_format: int
@@ -31,9 +34,29 @@ class Header:
     sqlite_version_number: int
 
 
-def parse_header(raw_header: bytes) -> Header:
+@dataclass(frozen=True)
+class BTreeHeader:
+    # 2,5,10,13
+    type_flag: int
+    first_freeblock: int
+    num_of_cells: int
+    cell_content: int
+    num_of_fragmented_free_bytes: int
+    right_most_pointer: Optional[int] = None
+
+
+def parse_file_header(raw_header: bytes) -> FileHeader:
     parsed = unpack(">16shbbbbbbIIIIIIIIIIII20xII", raw_header)
-    return Header(*parsed)
+    return FileHeader(*parsed)
+
+
+def parse_btree_header(raw_header: bytes) -> BTreeHeader:
+    type_flag = unpack(">b", raw_header[:1])[0]
+    if type_flag in (0x02, 0x05):
+        parsed = unpack(">bhhhbI", raw_header[:12])
+    elif type_flag in (0x0A, 0x0D):
+        parsed = unpack(">bhhhb", raw_header[:8])
+    return BTreeHeader(*parsed)
 
 
 database_file_path = sys.argv[1]
@@ -44,12 +67,11 @@ if command == ".dbinfo":
         # You can use print statements as follows for debugging, they'll be visible when running tests.
         print("Logs from your program will appear here!")
 
-        # header = parse_header(database_file.read()[:100])
-        # print(f"database page size: {header.page_size}")
+        file_header = parse_file_header(database_file.read(HEADER_SIZE))
+        print(f"database page size: {file_header.page_size}")
 
-        # Uncomment this to pass the first stage
-        database_file.seek(16)  # Skip the first 16 bytes of the header
-        page_size = int.from_bytes(database_file.read(2), byteorder="big")
-        print(f"database page size: {page_size}")
+        b_tree_header = parse_btree_header(database_file.read(12))
+        print(f"number of tables: {b_tree_header.num_of_cells}")
+
 else:
     print(f"Invalid command: {command}")
