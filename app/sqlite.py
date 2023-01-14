@@ -198,7 +198,6 @@ class Database:
         #   rootpage integer,
         #   sql text
         # );
-        print(self.header)
         self.sqlite_schema = BTree(self.read_pages(0, 1), 1)
 
     @property
@@ -227,7 +226,7 @@ class Database:
 
     def _parse_header(self) -> FileHeader:
         with open(self.database_file, "rb") as f:
-            parsed = unpack(">16shbbbbbbIIIIIIIIIIII20xII", f.read(HEADER_SIZE))
+            parsed = unpack(">16sHbbbbbbIIIIIIIIIIII20xII", f.read(HEADER_SIZE))
         return FileHeader(*parsed)
 
 
