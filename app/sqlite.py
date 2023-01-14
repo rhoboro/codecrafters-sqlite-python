@@ -5,7 +5,7 @@ from struct import unpack
 from typing import Iterable, Optional, Union
 
 HEADER_SIZE = 100
-ValueType = Union[str | int | bytes]
+ValueType = Union[str, int, bytes]
 
 
 class BTreeType(IntEnum):
