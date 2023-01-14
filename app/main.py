@@ -2,7 +2,7 @@ import sys
 
 # import sqlparse - available if you need it!
 
-from sqlite import Database
+from .sqlite import Database
 
 database_file_path = sys.argv[1]
 command = sys.argv[2]
