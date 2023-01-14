@@ -2,7 +2,7 @@ import itertools
 from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 from struct import unpack
-from typing import Iterable, Optional, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 HEADER_SIZE = 100
 ValueType = Union[str, int, bytes]
@@ -45,7 +45,7 @@ class SerialTypeCode(Enum):
     string = auto()
 
     @classmethod
-    def get_code_and_size(cls, num: int) -> tuple["SerialTypeCode", int]:
+    def get_code_and_size(cls, num: int) -> Tuple["SerialTypeCode", int]:
         code_and_size = SerialTypeCodeMap.get(num)
         if code_and_size is not None:
             return code_and_size[0], code_and_size[1]
@@ -140,7 +140,7 @@ class BTree:
 
     def _read_payload(
         self, payload: bytes
-    ) -> list[tuple[SerialTypeCode, int, ValueType]]:
+    ) -> List[Tuple[SerialTypeCode, int, ValueType]]:
         bytes_of_header, consumed = get_a_varint(payload)
         columns = []
         while consumed < bytes_of_header:
@@ -209,7 +209,7 @@ class Database:
         return len(self.sqlite_schema.cell_pointers)
 
     @property
-    def table_names(self) -> list[str]:
+    def table_names(self) -> List[str]:
         tables = []
         tbl_name_index = 2
         for row in self.sqlite_schema.rows:
@@ -235,7 +235,7 @@ def get_chunk(iterable, n=5):
         yield (x[1] for x in item)
 
 
-def get_a_varint(byte_list: bytes) -> tuple[int, int]:
+def get_a_varint(byte_list: bytes) -> Tuple[int, int]:
     """varint
 
     :return: (result, consumed)
