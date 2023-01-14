@@ -198,6 +198,7 @@ class Database:
         #   rootpage integer,
         #   sql text
         # );
+        print(self.header)
         self.sqlite_schema = BTree(self.read_pages(0, 1), 1)
 
     @property
