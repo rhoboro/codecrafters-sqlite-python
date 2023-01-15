@@ -16,6 +16,9 @@ if command == ".dbinfo":
 elif command == ".tables":
     print(" ".join(database.table_names))
 
+elif command == ".print_schema":
+    database.print_schema()
+
 elif command == ".print_rows":
     database.print_rows()
 

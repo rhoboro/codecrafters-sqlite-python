@@ -82,6 +82,7 @@ SerialTypeCodeMap = {
 @dataclass(frozen=True)
 class BTreeColumn:
     serial_type: SerialTypeCode
+    rowid: int
     size: int
     raw_value: bytes
 
@@ -148,18 +149,23 @@ class BTree:
             cell_position = high << 8 | low
             yield cell_position
 
-    def parse_cell(self, page: bytes, header: BTreeHeader, cell_position: int):
+    def parse_cell(
+        self, page: bytes, header: BTreeHeader, cell_position: int
+    ) -> List[BTreeColumn]:
         if header.type_flag == BTreeType.TableLeafCell:
             return self._parse_table_leaf_cell(page, cell_position)
 
         raise NotImplementedError()
 
-    def _parse_table_leaf_cell(self, page: bytes, cell_position: int):
+    def _parse_table_leaf_cell(
+        self, page: bytes, cell_position: int
+    ) -> List[BTreeColumn]:
         relative_position = cell_position
         bytes_of_payload, consumed_1 = get_a_varint(page[relative_position:])
         rowid, consumed_2 = get_a_varint(page[relative_position + consumed_1 :])
         row = list(
             self._read_payload(
+                rowid,
                 page[
                     relative_position
                     + consumed_1
@@ -167,12 +173,12 @@ class BTree:
                     + consumed_1
                     + consumed_2
                     + bytes_of_payload
-                ]
+                ],
             )
         )
         return row
 
-    def _read_payload(self, payload: bytes) -> Iterable[BTreeColumn]:
+    def _read_payload(self, rowid: int, payload: bytes) -> Iterable[BTreeColumn]:
         bytes_of_header, consumed = get_a_varint(payload)
         columns = []
         while consumed < bytes_of_header:
@@ -185,6 +191,7 @@ class BTree:
         for col_type, size in columns:
             yield BTreeColumn(
                 serial_type=col_type,
+                rowid=rowid,
                 size=size,
                 raw_value=payload[column_pos : column_pos + size],
             )
@@ -192,12 +199,13 @@ class BTree:
 
         return cols
 
-    def print_rows(self):
+    def print_rows(self) -> None:
         print(self.header)
         for row in self.rows:
             print("| ", end="")
             for col in row:
-                print(col.value, end=" | ")
+                # TODO: Use col.rowid only if col is rowid column
+                print(col.value or col.rowid, end=" | ")
             print()
 
 
@@ -255,6 +263,10 @@ class Database:
     @property
     def num_of_tables(self) -> int:
         return len(self.sqlite_schema.cell_pointers)
+
+    def print_schema(self) -> None:
+        for row in self.sqlite_schema.rows:
+            print(row[SQLITE_SCHEMA_INDEX_SQL].value, end=";\n")
 
     @property
     def table_names(self) -> List[str]:
