@@ -5,7 +5,13 @@ from struct import unpack
 from typing import Iterable, List, Optional, Tuple, Union
 
 HEADER_SIZE = 100
-ValueType = Union[str, int, bytes]
+SQLITE_SCHEMA_INDEX_TYPE = 0
+SQLITE_SCHEMA_INDEX_NAME = 1
+SQLITE_SCHEMA_INDEX_TABLE_NAME = 2
+SQLITE_SCHEMA_INDEX_ROOT_PAGE = 3
+SQLITE_SCHEMA_INDEX_SQL = 4
+
+ValueType = Union[None, bytes, str, int, float]
 
 
 class BTreeType(IntEnum):
@@ -51,7 +57,6 @@ class SerialTypeCode(Enum):
             return code_and_size[0], code_and_size[1]
 
         if num == 10 or num == 11:
-            # TODO:
             raise NotImplementedError()
 
         if num % 2 == 0:
@@ -74,6 +79,35 @@ SerialTypeCodeMap = {
 }
 
 
+@dataclass(frozen=True)
+class BTreeColumn:
+    serial_type: SerialTypeCode
+    size: int
+    raw_value: bytes
+
+    @property
+    def value(self) -> ValueType:
+        if self.serial_type == SerialTypeCode.null:
+            return None
+        elif self.serial_type in (
+            SerialTypeCode.int_8bit,
+            SerialTypeCode.int_16bit,
+            SerialTypeCode.int_24bit,
+            SerialTypeCode.int_32bit,
+            SerialTypeCode.int_48bit,
+            SerialTypeCode.int_64bit,
+            SerialTypeCode.int_0,
+            SerialTypeCode.int_1,
+        ):
+            return int.from_bytes(self.raw_value, byteorder="big", signed=True)
+        elif self.serial_type == SerialTypeCode.float_64bit:
+            return unpack(">f", self.raw_value)[0]
+        elif self.serial_type == SerialTypeCode.blob:
+            return self.raw_value
+        elif self.serial_type == SerialTypeCode.string:
+            return self.raw_value.decode()
+
+
 class BTree:
     def __init__(self, page: bytes, page_num: int, reserved_size: int = 0) -> None:
         self.page = page
@@ -84,7 +118,7 @@ class BTree:
             self.parse_cell_pointers(self.page, self.page_num, self.header)
         )
         self.rows = [
-            self.parse_cell(self.page, self.page_num, self.header, cell_position)
+            self.parse_cell(self.page, self.header, cell_position)
             for cell_position in self.cell_pointers
         ]
 
@@ -114,33 +148,31 @@ class BTree:
             cell_position = high << 8 | low
             yield cell_position
 
-    def parse_cell(
-        self, page: bytes, page_num: int, header: BTreeHeader, cell_position: int
-    ):
+    def parse_cell(self, page: bytes, header: BTreeHeader, cell_position: int):
         if header.type_flag == BTreeType.TableLeafCell:
-            return self._parse_table_leaf_cell(page, page_num, cell_position)
+            return self._parse_table_leaf_cell(page, cell_position)
 
         raise NotImplementedError()
 
-    def _parse_table_leaf_cell(self, page: bytes, page_num: int, cell_position: int):
-        relative_position = cell_position - ((page_num - 1) * len(page))
+    def _parse_table_leaf_cell(self, page: bytes, cell_position: int):
+        relative_position = cell_position
         bytes_of_payload, consumed_1 = get_a_varint(page[relative_position:])
         rowid, consumed_2 = get_a_varint(page[relative_position + consumed_1 :])
-        row = self._read_payload(
-            page[
-                relative_position
-                + consumed_1
-                + consumed_2 : relative_position
-                + consumed_1
-                + consumed_2
-                + bytes_of_payload
-            ]
+        row = list(
+            self._read_payload(
+                page[
+                    relative_position
+                    + consumed_1
+                    + consumed_2 : relative_position
+                    + consumed_1
+                    + consumed_2
+                    + bytes_of_payload
+                ]
+            )
         )
         return row
 
-    def _read_payload(
-        self, payload: bytes
-    ) -> List[Tuple[SerialTypeCode, int, ValueType]]:
+    def _read_payload(self, payload: bytes) -> Iterable[BTreeColumn]:
         bytes_of_header, consumed = get_a_varint(payload)
         columns = []
         while consumed < bytes_of_header:
@@ -151,13 +183,29 @@ class BTree:
         cols = []
         column_pos = consumed
         for col_type, size in columns:
-            cols.append((col_type, size, payload[column_pos : column_pos + size]))
+            yield BTreeColumn(
+                serial_type=col_type,
+                size=size,
+                raw_value=payload[column_pos : column_pos + size],
+            )
             column_pos += size
 
         return cols
 
+    def print_rows(self):
+        print(self.header)
+        for row in self.rows:
+            print("| ", end="")
+            for col in row:
+                print(col.value, end=" | ")
+            print()
+
 
 class SQLiteException(Exception):
+    pass
+
+
+class NotFound(SQLiteException):
     pass
 
 
@@ -198,7 +246,7 @@ class Database:
         #   rootpage integer,
         #   sql text
         # );
-        self.sqlite_schema = BTree(self.read_pages(0, 1), 1)
+        self.sqlite_schema = BTree(self.read_pages(1, 1), 1)
 
     @property
     def page_size(self) -> int:
@@ -213,15 +261,51 @@ class Database:
         tables = []
         tbl_name_index = 2
         for row in self.sqlite_schema.rows:
-            table_name = (row[tbl_name_index][2]).decode()
+            table_name = row[tbl_name_index].value
             if not table_name.startswith("sqlite_"):
                 tables.append(table_name)
 
         return tables
 
+    def execute(self, query: str) -> str:
+        """execute query"""
+        from_table_name = query.split(" ")[-1]
+
+        table = None
+        for row in self.sqlite_schema.rows:
+            if row[SQLITE_SCHEMA_INDEX_TABLE_NAME].value == from_table_name:
+                table = row
+                break
+
+        if not table:
+            raise NotFound(from_table_name)
+
+        from_table = BTree(
+            self.read_pages(table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value, 1),
+            table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value,
+        )
+        return str(len(from_table.rows))
+
+    def print_rows(self, from_table_name: str = "apples") -> None:
+        table = None
+        for row in self.sqlite_schema.rows:
+            if row[SQLITE_SCHEMA_INDEX_TABLE_NAME].value == from_table_name:
+                table = row
+                break
+
+        if not table:
+            raise NotFound(from_table_name)
+
+        from_table = BTree(
+            self.read_pages(table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value, 1),
+            table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value,
+        )
+        from_table.print_rows()
+
     def read_pages(self, start: int, num: int) -> bytes:
+        # 'start' starts at 1
         with open(self.database_file, "rb") as f:
-            f.seek(self.page_size * start)
+            f.seek(self.page_size * (start - 1))
             return f.read(self.page_size * num)
 
     def _parse_header(self) -> FileHeader:
