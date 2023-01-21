@@ -1,8 +1,12 @@
 import sys
 
-from .sqlite import Database
 
-# import sqlparse - available if you need it!
+import sqlparse
+
+import pkg_resources
+print(list(pkg_resources.working_set))
+
+from .sqlite import Database
 
 
 database_file_path = sys.argv[1]
