@@ -1,10 +1,16 @@
 import itertools
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum, auto
 from struct import unpack
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-import app.libs.sqlparse as sqlparse
+sys.path.append((Path(__file__).parent / "libs").as_posix())
+
+
+import sqlparse
+
 
 HEADER_SIZE = 100
 SQLITE_SCHEMA_INDEX_TYPE = 0
