@@ -1,11 +1,6 @@
 import sys
 
 
-import sqlparse
-
-import pkg_resources
-print(list(pkg_resources.working_set))
-
 from .sqlite import Database
 
 
