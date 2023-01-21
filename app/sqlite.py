@@ -201,7 +201,7 @@ class BTreeCellPayload:
 
     def cast(self, value: Any) -> ValueType:
         if self.serial_type == SerialTypeCode.null:
-            return int(value)
+            return value
         elif self.serial_type in (
             SerialTypeCode.int_8bit,
             SerialTypeCode.int_16bit,
@@ -349,6 +349,19 @@ class BTree:
                 print(col.value or row.rowid, end=" | ")
             print()
 
+    def get_table_leaf_cells(self, db: "Database") -> Iterable[BTreeTableLeafCell]:
+        if self.header.type_flag == BTreeType.TableLeafCell:
+            for cell in self.rows:
+                yield cell
+
+        if self.header.type_flag == BTreeType.TableInteriorCell:
+            for cell in self.rows:
+                table = BTree(
+                    db.read_pages(cell.page_num_of_left_child, 1),
+                    cell.page_num_of_left_child,
+                )
+                yield from table.get_table_leaf_cells(db)
+
 
 class SQLiteException(Exception):
     pass
@@ -476,7 +489,7 @@ class Database:
                 cols.append(table.index_by_name(id_.get_name()))
                 primary_column = table.index_by_name(table.primary_key()[0].value)
 
-            for row in from_table.rows:
+            for row in from_table.get_table_leaf_cells(self):
                 skip = False
                 result = [None] * len(cols)
                 for i, r in enumerate(row.payload):
@@ -487,9 +500,13 @@ class Database:
                                 target, _, comparison, _, value = token.tokens
                                 comp = COMPARISONS[comparison.value]
                                 record = row.payload[table.index_by_name(target.value)]
+                                if i != table.index_by_name(target.value):
+                                    continue
+
                                 lhs = record.value if i != primary_column else row.rowid
                                 rhs = record.cast(value.value)
-                                if not getattr(lhs, comp)(rhs):
+                                res = getattr(lhs, comp)(rhs)
+                                if (not res) or res == NotImplemented:
                                     skip = True
 
                     if i in cols:
