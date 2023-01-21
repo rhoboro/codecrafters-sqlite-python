@@ -2,7 +2,9 @@ import itertools
 from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 from struct import unpack
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
+
+import sqlparse
 
 HEADER_SIZE = 100
 SQLITE_SCHEMA_INDEX_TYPE = 0
@@ -12,6 +14,46 @@ SQLITE_SCHEMA_INDEX_ROOT_PAGE = 3
 SQLITE_SCHEMA_INDEX_SQL = 4
 
 ValueType = Union[None, bytes, str, int, float]
+
+
+@dataclass(frozen=True)
+class SqliteSchema:
+    type: str
+    name: str
+    table_name: str
+    root_page: int
+    sql: sqlparse.sql.Statement
+
+    @property
+    def is_internal(self) -> bool:
+        return self.table_name.startswith("sqlite_")
+
+    @property
+    def columns(self) -> List[Tuple[sqlparse.sql.Token, List]]:
+        columns = []
+        for token in self.sql.tokens[-1].tokens:
+            if type(token) == sqlparse.sql.Parenthesis:
+                continue
+            if token.is_whitespace:
+                continue
+            if str(token.ttype) in ("Token.Punctuation",):
+                continue
+            if type(token) == sqlparse.sql.Identifier:
+                columns.append((token, []))
+                continue
+
+            elif type(token) == sqlparse.sql.IdentifierList:
+                for t in token.tokens:
+                    if type(t) == sqlparse.sql.Identifier:
+                        if t.value == "autoincrement":
+                            # autoincrement is a keyword
+                            continue
+                        columns.append((t, []))
+                        continue
+
+            columns[-1][1].append(token)
+
+        return columns
 
 
 class BTreeType(IntEnum):
@@ -80,9 +122,14 @@ SerialTypeCodeMap = {
 
 
 @dataclass(frozen=True)
-class BTreeColumn:
-    serial_type: SerialTypeCode
+class BTreeTableInteriorCell:
+    page_num_of_left_child: int
     rowid: int
+
+
+@dataclass(frozen=True)
+class BTreeCellPayload:
+    serial_type: SerialTypeCode
     size: int
     raw_value: bytes
 
@@ -107,6 +154,17 @@ class BTreeColumn:
             return self.raw_value
         elif self.serial_type == SerialTypeCode.string:
             return self.raw_value.decode()
+
+
+@dataclass(frozen=True)
+class BTreeTableLeafCell:
+    num_of_bytes_payload: int
+    rowid: int
+    payload: List[BTreeCellPayload]
+    first_overflow_page: Optional[int]
+
+
+BTreeCell = Union[BTreeTableInteriorCell, BTreeTableLeafCell]
 
 
 class BTree:
@@ -151,34 +209,50 @@ class BTree:
 
     def parse_cell(
         self, page: bytes, header: BTreeHeader, cell_position: int
-    ) -> List[BTreeColumn]:
+    ) -> BTreeCell:
         if header.type_flag == BTreeType.TableLeafCell:
             return self._parse_table_leaf_cell(page, cell_position)
+        elif header.type_flag == BTreeType.TableInteriorCell:
+            return self._parse_table_interior_cell(page, cell_position)
 
         raise NotImplementedError()
 
     def _parse_table_leaf_cell(
         self, page: bytes, cell_position: int
-    ) -> List[BTreeColumn]:
-        relative_position = cell_position
-        bytes_of_payload, consumed_1 = get_a_varint(page[relative_position:])
-        rowid, consumed_2 = get_a_varint(page[relative_position + consumed_1 :])
+    ) -> BTreeTableLeafCell:
+        bytes_of_payload, consumed_1 = get_a_varint(page[cell_position:])
+        rowid, consumed_2 = get_a_varint(page[cell_position + consumed_1 :])
         row = list(
             self._read_payload(
-                rowid,
                 page[
-                    relative_position
+                    cell_position
                     + consumed_1
-                    + consumed_2 : relative_position
+                    + consumed_2 : cell_position
                     + consumed_1
                     + consumed_2
                     + bytes_of_payload
                 ],
             )
         )
-        return row
+        return BTreeTableLeafCell(
+            num_of_bytes_payload=bytes_of_payload,
+            rowid=rowid,
+            payload=row,
+            first_overflow_page=None,
+        )
 
-    def _read_payload(self, rowid: int, payload: bytes) -> Iterable[BTreeColumn]:
+    def _parse_table_interior_cell(
+        self, page: bytes, cell_position: int
+    ) -> BTreeTableInteriorCell:
+        page_left_child = int.from_bytes(
+            page[cell_position : cell_position + 4], byteorder="big", signed=True
+        )
+        rowid, consumed = get_a_varint(page[cell_position + 4 :])
+        return BTreeTableInteriorCell(
+            page_num_of_left_child=page_left_child, rowid=rowid
+        )
+
+    def _read_payload(self, payload: bytes) -> Iterable[BTreeCellPayload]:
         bytes_of_header, consumed = get_a_varint(payload)
         columns = []
         while consumed < bytes_of_header:
@@ -189,9 +263,8 @@ class BTree:
         cols = []
         column_pos = consumed
         for col_type, size in columns:
-            yield BTreeColumn(
+            yield BTreeCellPayload(
                 serial_type=col_type,
-                rowid=rowid,
                 size=size,
                 raw_value=payload[column_pos : column_pos + size],
             )
@@ -203,9 +276,9 @@ class BTree:
         print(self.header)
         for row in self.rows:
             print("| ", end="")
-            for col in row:
+            for col in row.payload:
                 # TODO: Use col.rowid only if col is rowid column
-                print(col.value or col.rowid, end=" | ")
+                print(col.value or row.rowid, end=" | ")
             print()
 
 
@@ -255,6 +328,7 @@ class Database:
         #   sql text
         # );
         self.sqlite_schema = BTree(self.read_pages(1, 1), 1)
+        self._sqlite_schema_rows = {}
 
     @property
     def page_size(self) -> int:
@@ -265,52 +339,91 @@ class Database:
         return len(self.sqlite_schema.cell_pointers)
 
     def print_schema(self) -> None:
-        for row in self.sqlite_schema.rows:
-            print(row[SQLITE_SCHEMA_INDEX_SQL].value, end=";\n")
+        for row in self.sqlite_schema_rows.values():
+            print(row.sql, end=";\n")
 
     @property
-    def table_names(self) -> List[str]:
-        tables = []
-        tbl_name_index = 2
+    def sqlite_schema_rows(self) -> Dict[str, SqliteSchema]:
+        if self._sqlite_schema_rows:
+            return self._sqlite_schema_rows
+
         for row in self.sqlite_schema.rows:
-            table_name = row[tbl_name_index].value
-            if not table_name.startswith("sqlite_"):
-                tables.append(table_name)
+            self._sqlite_schema_rows[
+                row.payload[SQLITE_SCHEMA_INDEX_NAME].value
+            ] = SqliteSchema(
+                type=row.payload[SQLITE_SCHEMA_INDEX_TYPE].value,
+                name=row.payload[SQLITE_SCHEMA_INDEX_NAME].value,
+                table_name=row.payload[SQLITE_SCHEMA_INDEX_TABLE_NAME].value,
+                root_page=int(row.payload[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value),
+                sql=sqlparse.parse(row.payload[SQLITE_SCHEMA_INDEX_SQL].value)[0],
+            )
 
-        return tables
+        return self._sqlite_schema_rows
 
-    def execute(self, query: str) -> str:
+    @property
+    def tables(self) -> Dict[str, SqliteSchema]:
+        return {
+            name: row
+            for name, row in self.sqlite_schema_rows.items()
+            if row.type == "table" and not row.table_name.startswith("sqlite_")
+        }
+
+    def query(self, q: str) -> Iterable[str]:
         """execute query"""
-        from_table_name = query.split(" ")[-1]
+        from_table_name = None
+        query = sqlparse.parse(q)[0]
+        if query.get_type() != "SELECT":
+            raise NotImplementedError()
 
-        table = None
-        for row in self.sqlite_schema.rows:
-            if row[SQLITE_SCHEMA_INDEX_TABLE_NAME].value == from_table_name:
-                table = row
+        for i, token in enumerate(query.tokens):
+            if token.value == "FROM":
+                ids = query[i - 2]
+                from_table_name = query[i + 2]
                 break
 
+        table = self.tables.get(from_table_name.value)
         if not table:
-            raise NotFound(from_table_name)
+            raise NotFound(from_table_name.value)
 
         from_table = BTree(
-            self.read_pages(table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value, 1),
-            table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value,
+            self.read_pages(table.root_page, 1),
+            table.root_page,
         )
-        return str(len(from_table.rows))
+
+        if (
+            type(ids) == sqlparse.sql.Function
+            and ids.token_first().value.upper() == "COUNT"
+        ):
+            yield str(len(from_table.rows))
+
+        elif type(ids) == sqlparse.sql.Identifier:
+            col = ids.get_name()
+            for index, c in enumerate(table.columns):
+                if c[0].value == col:
+                    is_primary_key = any(
+                        [t for t in c[1] if t.value.upper() == "PRIMARY"]
+                    )
+                    break
+            else:
+                raise NotFound(col)
+
+            for row in from_table.rows:
+                if is_primary_key:
+                    yield str(row.rowid)
+                else:
+                    yield str(row.payload[index].value)
+
+        elif type(ids) == sqlparse.sql.IdentifierList:
+            raise NotImplementedError()
 
     def print_rows(self, from_table_name: str = "apples") -> None:
-        table = None
-        for row in self.sqlite_schema.rows:
-            if row[SQLITE_SCHEMA_INDEX_TABLE_NAME].value == from_table_name:
-                table = row
-                break
-
+        table = self.tables.get(from_table_name)
         if not table:
             raise NotFound(from_table_name)
 
         from_table = BTree(
-            self.read_pages(table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value, 1),
-            table[SQLITE_SCHEMA_INDEX_ROOT_PAGE].value,
+            self.read_pages(table.root_page, 1),
+            table.root_page,
         )
         from_table.print_rows()
 

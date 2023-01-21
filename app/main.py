@@ -14,7 +14,7 @@ if command == ".dbinfo":
     print(f"number of tables: {database.num_of_tables}")
 
 elif command == ".tables":
-    print(" ".join(database.table_names))
+    print(" ".join(f"{name}" for name, table in database.tables.items()))
 
 elif command == ".print_schema":
     database.print_schema()
@@ -23,4 +23,4 @@ elif command == ".print_rows":
     database.print_rows()
 
 else:
-    print(database.execute(command))
+    print("\n".join(str(row) for row in database.query(command)))
