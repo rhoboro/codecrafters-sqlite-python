@@ -445,7 +445,7 @@ class Database:
 
         where = None
         for i, token in enumerate(query.tokens):
-            if token.value == "FROM":
+            if token.value.upper() == "FROM":
                 ids = query[i - 2]
                 from_table_name = query[i + 2]
             elif type(token) == sqlparse.sql.Where:
