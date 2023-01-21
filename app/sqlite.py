@@ -1,10 +1,10 @@
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum, auto
 from struct import unpack
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-import sqlparse
+import app.libs.sqlparse as sqlparse
 
 HEADER_SIZE = 100
 SQLITE_SCHEMA_INDEX_TYPE = 0
@@ -13,23 +13,34 @@ SQLITE_SCHEMA_INDEX_TABLE_NAME = 2
 SQLITE_SCHEMA_INDEX_ROOT_PAGE = 3
 SQLITE_SCHEMA_INDEX_SQL = 4
 
+COMPARISONS = {
+    "=": "__eq__",
+    ">": "__gt__",
+    "<": "__lt__",
+    ">=": "__ge__",
+    "<=": "__le__",
+    "!=": "__ne__",
+}
+
+
 ValueType = Union[None, bytes, str, int, float]
 
 
-@dataclass(frozen=True)
+@dataclass()
 class SqliteSchema:
     type: str
     name: str
     table_name: str
     root_page: int
     sql: sqlparse.sql.Statement
+    is_internal: bool = field(init=False)
+    columns: List[Tuple[sqlparse.sql.Token, List]] = field(init=False)
 
-    @property
-    def is_internal(self) -> bool:
-        return self.table_name.startswith("sqlite_")
+    def __post_init__(self):
+        self.is_internal = self.table_name.startswith("sqlite_")
+        self.columns = self._columns()
 
-    @property
-    def columns(self) -> List[Tuple[sqlparse.sql.Token, List]]:
+    def _columns(self) -> List[Tuple[sqlparse.sql.Token, List]]:
         columns = []
         for token in self.sql.tokens[-1].tokens:
             if type(token) == sqlparse.sql.Parenthesis:
@@ -54,6 +65,33 @@ class SqliteSchema:
             columns[-1][1].append(token)
 
         return columns
+
+    def column_by_name(self, name: str) -> Tuple[sqlparse.sql.Token, List]:
+        for id_, column in self.columns:
+            if id_.value == name:
+                return id_, column
+
+        raise NotFound(name)
+
+    def column_by_index(self, index: int) -> Tuple[sqlparse.sql.Token, List]:
+        try:
+            return self.columns[index]
+        except IndexError:
+            raise NotFound(index)
+
+    def index_by_name(self, name: str) -> int:
+        for i, (id_, column) in enumerate(self.columns):
+            if id_.value == name:
+                return i
+
+        raise NotFound(name)
+
+    def primary_key(self) -> Tuple[sqlparse.sql.Token, List]:
+        for c in self.columns:
+            if [t for t in c[1] if t.value.upper() == "PRIMARY"]:
+                return c
+
+        raise NotFound()
 
 
 class BTreeType(IntEnum):
@@ -154,6 +192,30 @@ class BTreeCellPayload:
             return self.raw_value
         elif self.serial_type == SerialTypeCode.string:
             return self.raw_value.decode()
+
+    def cast(self, value: Any) -> ValueType:
+        if self.serial_type == SerialTypeCode.null:
+            return int(value)
+        elif self.serial_type in (
+            SerialTypeCode.int_8bit,
+            SerialTypeCode.int_16bit,
+            SerialTypeCode.int_24bit,
+            SerialTypeCode.int_32bit,
+            SerialTypeCode.int_48bit,
+            SerialTypeCode.int_64bit,
+            SerialTypeCode.int_0,
+            SerialTypeCode.int_1,
+        ):
+            return int(value)
+        elif self.serial_type == SerialTypeCode.float_64bit:
+            return float(value)
+        elif self.serial_type == SerialTypeCode.blob:
+            return bytes(value)
+        elif self.serial_type == SerialTypeCode.string:
+            value = str(value)
+            if value.startswith("'") and value.endswith("'"):
+                return value[1:-1]
+            return value
 
 
 @dataclass(frozen=True)
@@ -375,11 +437,13 @@ class Database:
         if query.get_type() != "SELECT":
             raise NotImplementedError()
 
+        where = None
         for i, token in enumerate(query.tokens):
             if token.value == "FROM":
                 ids = query[i - 2]
                 from_table_name = query[i + 2]
-                break
+            elif type(token) == sqlparse.sql.Where:
+                where = token
 
         table = self.tables.get(from_table_name.value)
         if not table:
@@ -389,32 +453,49 @@ class Database:
             self.read_pages(table.root_page, 1),
             table.root_page,
         )
-
         if (
             type(ids) == sqlparse.sql.Function
             and ids.token_first().value.upper() == "COUNT"
         ):
             yield str(len(from_table.rows))
 
-        elif type(ids) == sqlparse.sql.Identifier:
-            col = ids.get_name()
-            for index, c in enumerate(table.columns):
-                if c[0].value == col:
-                    is_primary_key = any(
-                        [t for t in c[1] if t.value.upper() == "PRIMARY"]
-                    )
-                    break
-            else:
-                raise NotFound(col)
+        elif type(ids) in (sqlparse.sql.Identifier, sqlparse.sql.IdentifierList):
+            primary_column = -1
+            cols = []
+            tokens = [ids] if type(ids) == sqlparse.sql.Identifier else ids.tokens
+            for id_ in tokens:
+                if type(id_) != sqlparse.sql.Identifier:
+                    continue
+
+                cols.append(table.index_by_name(id_.get_name()))
+                primary_column = table.index_by_name(table.primary_key()[0].value)
 
             for row in from_table.rows:
-                if is_primary_key:
-                    yield str(row.rowid)
-                else:
-                    yield str(row.payload[index].value)
+                skip = False
+                result = [None] * len(cols)
+                for i, r in enumerate(row.payload):
 
-        elif type(ids) == sqlparse.sql.IdentifierList:
-            raise NotImplementedError()
+                    if where:
+                        for token in where.tokens:
+                            if type(token) == sqlparse.sql.Comparison:
+                                target, _, comparison, _, value = token.tokens
+                                comp = COMPARISONS[comparison.value]
+                                record = row.payload[table.index_by_name(target.value)]
+                                lhs = record.value if i != primary_column else row.rowid
+                                rhs = record.cast(value.value)
+                                if not getattr(lhs, comp)(rhs):
+                                    skip = True
+
+                    if i in cols:
+                        if i == primary_column:
+                            result[cols.index(i)] = str(row.rowid)
+                        else:
+                            result[cols.index(i)] = str(row.payload[i].value)
+
+                if skip:
+                    continue
+
+                yield "|".join(result)
 
     def print_rows(self, from_table_name: str = "apples") -> None:
         table = self.tables.get(from_table_name)
