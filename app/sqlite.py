@@ -232,7 +232,27 @@ class BTreeTableLeafCell:
     first_overflow_page: Optional[int]
 
 
-BTreeCell = Union[BTreeTableInteriorCell, BTreeTableLeafCell]
+@dataclass(frozen=True)
+class BTreeIndexInteriorCell:
+    page_num_of_left_child: int
+    num_of_bytes_payload: int
+    payload: List[BTreeCellPayload]
+    first_overflow_page: Optional[int]
+
+
+@dataclass(frozen=True)
+class BTreeIndexLeafCell:
+    num_of_bytes_payload: int
+    payload: List[BTreeCellPayload]
+    first_overflow_page: Optional[int]
+
+
+BTreeCell = Union[
+    BTreeTableInteriorCell,
+    BTreeTableLeafCell,
+    BTreeIndexInteriorCell,
+    BTreeIndexLeafCell,
+]
 
 
 class BTree:
@@ -282,6 +302,10 @@ class BTree:
             return self._parse_table_leaf_cell(page, cell_position)
         elif header.type_flag == BTreeType.TableInteriorCell:
             return self._parse_table_interior_cell(page, cell_position)
+        elif header.type_flag == BTreeType.IndexLeafCell:
+            return self._parse_index_leaf_cell(page, cell_position)
+        elif header.type_flag == BTreeType.IndexInteriorCell:
+            return self._parse_index_interior_cell(page, cell_position)
 
         raise NotImplementedError()
 
@@ -306,6 +330,7 @@ class BTree:
             num_of_bytes_payload=bytes_of_payload,
             rowid=rowid,
             payload=row,
+            # TODO:
             first_overflow_page=None,
         )
 
@@ -318,6 +343,52 @@ class BTree:
         rowid, consumed = get_a_varint(page[cell_position + 4 :])
         return BTreeTableInteriorCell(
             page_num_of_left_child=page_left_child, rowid=rowid
+        )
+
+    def _parse_index_leaf_cell(
+        self, page: bytes, cell_position: int
+    ) -> BTreeIndexLeafCell:
+        bytes_of_payload, consumed_1 = get_a_varint(page[cell_position:])
+        row = list(
+            self._read_payload(
+                page[
+                    cell_position
+                    + consumed_1 : cell_position
+                    + consumed_1
+                    + bytes_of_payload
+                ],
+            )
+        )
+        return BTreeIndexLeafCell(
+            num_of_bytes_payload=bytes_of_payload,
+            payload=row,
+            # TODO
+            first_overflow_page=None,
+        )
+
+    def _parse_index_interior_cell(
+        self, page: bytes, cell_position: int
+    ) -> BTreeIndexInteriorCell:
+        page_left_child = int.from_bytes(
+            page[cell_position : cell_position + 4], byteorder="big", signed=True
+        )
+        bytes_of_payload, consumed_1 = get_a_varint(page[cell_position:])
+        row = list(
+            self._read_payload(
+                page[
+                    cell_position
+                    + consumed_1 : cell_position
+                    + consumed_1
+                    + bytes_of_payload
+                ],
+            )
+        )
+        return BTreeIndexInteriorCell(
+            page_num_of_left_child=page_left_child,
+            num_of_bytes_payload=bytes_of_payload,
+            payload=row,
+            # TODO
+            first_overflow_page=None,
         )
 
     def _read_payload(self, payload: bytes) -> Iterable[BTreeCellPayload]:
@@ -520,7 +591,7 @@ class Database:
 
                 yield "|".join(result)
 
-    def print_rows(self, from_table_name: str = "apples") -> None:
+    def print_rows(self, from_table_name: str = "companies") -> None:
         table = self.tables.get(from_table_name)
         if not table:
             raise NotFound(from_table_name)
